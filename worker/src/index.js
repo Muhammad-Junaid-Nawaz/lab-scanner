@@ -1,21 +1,21 @@
-// Cloudflare Worker — receives an image from the PWA, sends it to a Workers AI
-// vision-language model, and returns the transcribed text as lines.
-//
-// No third-party OCR account needed: Workers AI runs inside your own
-// Cloudflare account, bound to this Worker via the [ai] binding in
-// wrangler.toml. The image never touches Azure, Google, or anyone else.
+// Cloudflare Worker — receives an image from the PWA, sends it to Google
+// Cloud Vision's DOCUMENT_TEXT_DETECTION (a purpose-built OCR engine, not a
+// general vision-language model), and returns the transcribed text as lines.
 //
 // Setup:
-//   1. wrangler.toml already binds the AI runtime (see [ai] section).
-//   2. Deploy with: wrangler deploy
-//   3. Note the deployed URL, e.g. https://lab-scanner-ocr.<you>.workers.dev
+//   1. A Google Cloud project with Vision API enabled and billing on.
+//   2. An API key restricted to the Vision API only.
+//   3. That key stored as a Cloudflare secret named GOOGLE_VISION_API_KEY
+//      (Settings -> Build -> Variables and secrets, type "Secret", for a
+//      Worker deployed via Git integration).
+//   4. Deploy (push to main, or trigger a rebuild) so the secret is picked
+//      up by the running Worker.
 //
-// Model notes:
-//   @cf/meta/llama-3.2-11b-vision-instruct reads an image + a text prompt
-//   and returns a text response. We prompt it to transcribe handwriting
-//   line by line rather than to "describe" the image.
-
-const MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
+// Why the swap from Workers AI: @cf/meta/llama-3.2-11b-vision-instruct is a
+// general vision-language model, not a dedicated OCR engine. Real-world
+// testing showed only ~60% digit accuracy (40% of numbers misread), which
+// isn't good enough for datasheets that are mostly numeric measurements.
+// Google Cloud Vision's OCR is purpose-built and much stronger on digits.
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -37,6 +37,10 @@ export default {
     }
 
     try {
+      if (!env.GOOGLE_VISION_API_KEY) {
+        return json({ error: "GOOGLE_VISION_API_KEY is not configured" }, 500);
+      }
+
       const form = await request.formData();
       const file = form.get("image");
       if (!file) {
@@ -44,21 +48,41 @@ export default {
       }
 
       const imageBuffer = await file.arrayBuffer();
-      const imageArray = [...new Uint8Array(imageBuffer)];
+      const base64Image = arrayBufferToBase64(imageBuffer);
 
-      const prompt =
-        "Transcribe every handwritten and printed line of text visible in " +
-        "this lab datasheet image, exactly as written, one line per line of " +
-        "output. Do not summarize, interpret, or add commentary — output " +
-        "only the transcribed lines, in the order they appear on the page.";
+      const visionRes = await fetch(
+        `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            requests: [
+              {
+                image: { content: base64Image },
+                features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+              },
+            ],
+          }),
+        }
+      );
 
-      const result = await env.AI.run(MODEL, {
-        image: imageArray,
-        prompt,
-        max_tokens: 1024,
-      });
+      if (!visionRes.ok) {
+        const errText = await visionRes.text();
+        return json(
+          { error: `Vision API error ${visionRes.status}: ${errText}` },
+          502
+        );
+      }
 
-      const text = (result && result.response) || "";
+      const visionData = await visionRes.json();
+      const result = visionData.responses && visionData.responses[0];
+      if (result && result.error) {
+        return json({ error: `Vision API error: ${result.error.message}` }, 502);
+      }
+
+      const text =
+        (result && result.fullTextAnnotation && result.fullTextAnnotation.text) ||
+        "";
       const lines = text
         .split("\n")
         .map((l) => l.trim())
@@ -70,6 +94,19 @@ export default {
     }
   },
 };
+
+function arrayBufferToBase64(buffer) {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, i + chunkSize)
+    );
+  }
+  return btoa(binary);
+}
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
