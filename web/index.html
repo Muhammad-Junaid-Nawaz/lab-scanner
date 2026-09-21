@@ -6,68 +6,93 @@
 <title>Lab Scanner (experiment)</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
-body { font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 16px; }
-video, canvas, img { width: 100%; border-radius: 8px; }
-textarea { width: 100%; height: 200px; }
-button { padding: 10px 16px; margin: 6px 0; width: 100%; font-size: 16px; }
+  body { font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 16px; }
+  video, canvas, img { width: 100%; border-radius: 8px; }
+  textarea { width: 100%; height: 220px; font-family: monospace; white-space: pre; }
+  button { padding: 10px 16px; margin: 6px 0; width: 100%; font-size: 16px; }
+  .hint { font-size: 13px; color: #555; }
 </style>
 </head>
 <body>
-<h2>Lab Scanner — experiment</h2>
-<video id="video" autoplay playsinline></video>
-<canvas id="canvas" hidden></canvas>
-<button id="captureBtn">Capture photo</button>
-<img id="preview" hidden>
-<button id="scanBtn" hidden>Send for OCR</button>
-<p id="status"></p>
-<h4>Extracted text (edit before export)</h4>
-<textarea id="ocrText" placeholder="Extracted text will appear here. Each line becomes a row."></textarea>
-<button id="exportBtn">Export to Excel</button>
-<script>
-const OCR_ENDPOINT = "https://lab-scanner.mjn97631.workers.dev";
-const video = document.getElementById('video');
-const canvas = document.getElementById('canvas');
-const preview = document.getElementById('preview');
-const status = document.getElementById('status');
-const ocrText = document.getElementById('ocrText');
-navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
-.then(stream => { video.srcObject = stream; })
-.catch(err => { status.textContent = "Camera access failed: " + err.message; });
-let capturedBlob = null;
-document.getElementById('captureBtn').onclick = () => {
-canvas.width = video.videoWidth;
-canvas.height = video.videoHeight;
-canvas.getContext('2d').drawImage(video, 0, 0);
-canvas.toBlob(blob => {
-capturedBlob = blob;
-preview.src = URL.createObjectURL(blob);
-preview.hidden = false;
-document.getElementById('scanBtn').hidden = false;
-}, 'image/jpeg', 0.9);
-};
-document.getElementById('scanBtn').onclick = async () => {
-if (!capturedBlob) return;
-status.textContent = "Sending to OCR...";
-try {
-const form = new FormData();
-form.append('image', capturedBlob, 'scan.jpg');
-const res = await fetch(OCR_ENDPOINT, { method: 'POST', body: form });
-if (!res.ok) throw new Error(`Server returned ${res.status}`);
-const data = await res.json();
-ocrText.value = (data.lines || []).join('\n');
-status.textContent = "Done. Review/edit the text below, then export.";
-} catch (err) {
-status.textContent = "OCR request failed: " + err.message;
-}
-};
-document.getElementById('exportBtn').onclick = () => {
-const lines = ocrText.value.split('\n').filter(l => l.trim().length > 0);
-const rows = lines.map(line => [line]);
-const ws = XLSX.utils.aoa_to_sheet([["Extracted line"], ...rows]);
-const wb = XLSX.utils.book_new();
-XLSX.utils.book_append_sheet(wb, ws, "Scan");
-XLSX.writeFile(wb, `scan_${Date.now()}.xlsx`);
-};
-</script>
+  <h2>Lab Scanner — experiment</h2>
+
+  <video id="video" autoplay playsinline></video>
+  <canvas id="canvas" hidden></canvas>
+  <button id="captureBtn">Capture photo</button>
+
+  <img id="preview" hidden>
+  <button id="scanBtn" hidden>Send for OCR</button>
+
+  <p id="status"></p>
+
+  <h4>Extracted table (edit before export)</h4>
+  <p class="hint">Each line is one row. Cells within a row are separated by
+    a Tab character (shown as spacing) — this maps directly onto Excel
+    columns on export. Editing is easiest by pasting into a spreadsheet
+    app first if a row's columns look wrong, then pasting the fixed text
+    back here.</p>
+  <textarea id="ocrText" placeholder="Extracted table will appear here. Each line becomes a row; Tab-separated cells become columns."></textarea>
+
+  <button id="exportBtn">Export to Excel</button>
+
+  <script>
+    // Point this at your deployed Cloudflare Worker URL.
+    const OCR_ENDPOINT = "https://lab-scanner.mjn97631.workers.dev";
+
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const preview = document.getElementById('preview');
+    const status = document.getElementById('status');
+    const ocrText = document.getElementById('ocrText');
+
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+      .then(stream => { video.srcObject = stream; })
+      .catch(err => { status.textContent = "Camera access failed: " + err.message; });
+
+    let capturedBlob = null;
+
+    document.getElementById('captureBtn').onclick = () => {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0);
+      canvas.toBlob(blob => {
+        capturedBlob = blob;
+        preview.src = URL.createObjectURL(blob);
+        preview.hidden = false;
+        document.getElementById('scanBtn').hidden = false;
+      }, 'image/jpeg', 0.9);
+    };
+
+    document.getElementById('scanBtn').onclick = async () => {
+      if (!capturedBlob) return;
+      status.textContent = "Sending to OCR...";
+      try {
+        const form = new FormData();
+        form.append('image', capturedBlob, 'scan.jpg');
+        const res = await fetch(OCR_ENDPOINT, { method: 'POST', body: form });
+        if (!res.ok) throw new Error(`Server returned ${res.status}`);
+        const data = await res.json();
+        // data.lines is already Tab-separated per row (reconstructed table
+        // grid from the Worker); fall back to data.raw if rows came back empty.
+        ocrText.value = (data.lines && data.lines.length > 0)
+          ? data.lines.join('\n')
+          : (data.raw || '');
+        status.textContent = "Done. Review/edit the table below, then export.";
+      } catch (err) {
+        status.textContent = "OCR request failed: " + err.message;
+      }
+    };
+
+    document.getElementById('exportBtn').onclick = () => {
+      const rows = ocrText.value
+        .split('\n')
+        .filter(line => line.trim().length > 0)
+        .map(line => line.split('\t'));
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Scan");
+      XLSX.writeFile(wb, `scan_${Date.now()}.xlsx`);
+    };
+  </script>
 </body>
 </html>
