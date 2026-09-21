@@ -4,6 +4,17 @@
 // reading order only — it has no idea the page is a table — so we rebuild
 // rows/columns ourselves from each word's x/y position).
 //
+// Reconstruction strategy: columns first, then rows within each column.
+// A printed data sheet has fixed vertical column bands (e.g. Rep / Trt /
+// Sample ID / pH), so we cluster words into columns by horizontal position
+// first. Then, independently within each column, we group words into cells
+// by vertical position and pick the column with the most cells as the
+// "anchor" row order, matching every other column's cells to the nearest
+// anchor row by vertical distance. This is more robust than clustering rows
+// globally across the whole page: a handwritten value that drifts slightly
+// above/below its printed row line only affects matching within its own
+// column, instead of shifting or dropping values across the whole row.
+//
 // Setup:
 //   1. A Google Cloud project with Vision API enabled and billing on.
 //   2. An API key restricted to the Vision API only.
@@ -134,59 +145,107 @@ function extractWords(result) {
   return words;
 }
 
-// Cluster words into rows by vertical center, then split each row into
-// cells wherever the horizontal gap between consecutive words is large
-// relative to typical word width (a column boundary) rather than small
-// (just a space within the same cell/word run).
+// Reconstruct the grid columns-first: cluster words into vertical column
+// bands by horizontal gaps, then within each column cluster into cells by
+// vertical gaps, then align every column's cells to a shared row order by
+// matching each to the nearest row in the column that has the most cells
+// (the "anchor" column — normally the most completely-filled one).
 function wordsToGrid(words) {
   if (words.length === 0) return [];
 
   const medianHeight = median(words.map((w) => w.height)) || 20;
-  const rowTolerance = medianHeight * 0.6;
-
-  // Sort by vertical position, then greedily group into rows.
-  const sorted = [...words].sort((a, b) => a.cy - b.cy);
-  const rowGroups = [];
-  for (const w of sorted) {
-    let placed = false;
-    for (const group of rowGroups) {
-      if (Math.abs(group.avgCy - w.cy) <= rowTolerance) {
-        group.words.push(w);
-        group.avgCy =
-          group.words.reduce((sum, x) => sum + x.cy, 0) / group.words.length;
-        placed = true;
-        break;
-      }
-    }
-    if (!placed) {
-      rowGroups.push({ avgCy: w.cy, words: [w] });
-    }
-  }
-  rowGroups.sort((a, b) => a.avgCy - b.avgCy);
-
   const medianWidth = median(words.map((w) => w.width)) || 20;
-  const columnGapThreshold = medianWidth * 1.8;
+  const rowTolerance = medianHeight * 0.6;
+  const columnGapThreshold = medianWidth * 2.2;
 
-  const rows = rowGroups.map((group) => {
-    const rowWords = [...group.words].sort((a, b) => a.left - b.left);
-    const cells = [];
-    let currentCellWords = [];
-    let prevRight = null;
-    for (const w of rowWords) {
-      if (prevRight !== null && w.left - prevRight > columnGapThreshold) {
-        cells.push(currentCellWords.join(" "));
-        currentCellWords = [];
+  // 1. Cluster into columns by horizontal gaps between words, sorted left to right.
+  const sortedByX = [...words].sort((a, b) => a.left - b.left);
+  const columnGroups = [];
+  let currentColumn = [];
+  let prevRight = null;
+  for (const w of sortedByX) {
+    if (prevRight !== null && w.left - prevRight > columnGapThreshold) {
+      columnGroups.push(currentColumn);
+      currentColumn = [];
+      prevRight = null;
+    }
+    currentColumn.push(w);
+    prevRight = prevRight === null ? w.right : Math.max(prevRight, w.right);
+  }
+  if (currentColumn.length > 0) columnGroups.push(currentColumn);
+
+  // Sort columns left to right by average left edge.
+  columnGroups.sort((a, b) => avg(a.map((w) => w.left)) - avg(b.map((w) => w.left)));
+
+  // 2. Within each column, group words into cells by vertical gaps (merges
+  // multi-word cells on the same line, e.g. a two-word header).
+  const columnCells = columnGroups.map((colWords) => {
+    const sortedByY = [...colWords].sort((a, b) => a.cy - b.cy);
+    const cellGroups = [];
+    let currentCell = [];
+    let prevCy = null;
+    for (const w of sortedByY) {
+      if (prevCy !== null && Math.abs(w.cy - prevCy) > rowTolerance) {
+        cellGroups.push(currentCell);
+        currentCell = [];
       }
-      currentCellWords.push(w.text);
-      prevRight = w.right;
+      currentCell.push(w);
+      prevCy = w.cy;
     }
-    if (currentCellWords.length > 0) {
-      cells.push(currentCellWords.join(" "));
-    }
-    return cells;
+    if (currentCell.length > 0) cellGroups.push(currentCell);
+
+    return cellGroups.map((cellWords) => {
+      const sortedByLeft = [...cellWords].sort((a, b) => a.left - b.left);
+      return {
+        text: sortedByLeft.map((w) => w.text).join(" "),
+        cy: avg(cellWords.map((w) => w.cy)),
+      };
+    });
+  });
+
+  if (columnCells.length === 0) return [];
+
+  // 3. Pick the column with the most cells as the anchor row order — this is
+  // normally the most completely-filled column on the page.
+  let anchorIndex = 0;
+  for (let i = 1; i < columnCells.length; i++) {
+    if (columnCells[i].length > columnCells[anchorIndex].length) anchorIndex = i;
+  }
+  const anchorRows = [...columnCells[anchorIndex]].sort((a, b) => a.cy - b.cy);
+
+  const rowMatchTolerance = rowTolerance * 2.5;
+
+  // 4. For each anchor row, find each column's nearest not-yet-used cell
+  // within tolerance (greedy, top-to-bottom — both lists are sorted by cy,
+  // so this naturally avoids double-assigning a cell to two rows).
+  const rows = anchorRows.map((anchorCell) => {
+    return columnCells.map((cellsInColumn, colIndex) => {
+      if (colIndex === anchorIndex) return anchorCell.text;
+      let bestIndex = -1;
+      let bestDist = Infinity;
+      for (let i = 0; i < cellsInColumn.length; i++) {
+        const cell = cellsInColumn[i];
+        if (cell.used) continue;
+        const dist = Math.abs(cell.cy - anchorCell.cy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIndex = i;
+        }
+      }
+      if (bestIndex !== -1 && bestDist <= rowMatchTolerance) {
+        cellsInColumn[bestIndex].used = true;
+        return cellsInColumn[bestIndex].text;
+      }
+      return "";
+    });
   });
 
   return rows;
+}
+
+function avg(nums) {
+  if (nums.length === 0) return 0;
+  return nums.reduce((sum, n) => sum + n, 0) / nums.length;
 }
 
 function median(nums) {
