@@ -29,19 +29,6 @@ export default {
       return new Response(null, { headers: CORS_HEADERS });
     }
 
-    const url = new URL(request.url);
-
-    // One-time Meta license acceptance for this model. Visit /agree once
-    // (GET or POST) after deploy, then this route can be removed.
-    if (url.pathname === "/agree") {
-      try {
-        const result = await env.AI.run(MODEL, { prompt: "agree" });
-        return json({ ok: true, result });
-      } catch (err) {
-        return json({ ok: false, error: err.message || String(err) }, 500);
-      }
-    }
-
     if (request.method !== "POST") {
       return new Response(JSON.stringify({ error: "Use POST" }), {
         status: 405,
