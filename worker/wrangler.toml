@@ -1,0 +1,8 @@
+name = "lab-scanner-ocr"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Binds Cloudflare Workers AI to this Worker as `env.AI`.
+# No API key needed — it uses your Cloudflare account directly.
+[ai]
+binding = "AI"
