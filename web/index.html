@@ -83,7 +83,7 @@
       }
     };
 
-    document.getElementById('exportBtn').onclick = () => {
+    document.getElementById('exportBtn').onclick = async () => {
       const rows = ocrText.value
         .split('\n')
         .filter(line => line.trim().length > 0)
@@ -91,7 +91,38 @@
       const ws = XLSX.utils.aoa_to_sheet(rows);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Scan");
-      XLSX.writeFile(wb, `scan_${Date.now()}.xlsx`);
+
+      const wbArray = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const blob = new Blob([wbArray], { type: mimeType });
+      const filename = `scan_${Date.now()}.xlsx`;
+      const file = new File([blob], filename, { type: mimeType });
+
+      // Prefer the native Share sheet when it can share this file — this is
+      // much more reliable on Android Chrome, where a script-triggered
+      // anchor download can be silently blocked with no visible error.
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: filename });
+          status.textContent = 'Choose "Save" (or your Files app) in the share sheet to save the spreadsheet.';
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') return; // user cancelled the share sheet
+          // otherwise fall through to the direct-download fallback below
+        }
+      }
+
+      // Fallback: classic anchor-click download (desktop browsers, and
+      // mobile browsers without Web Share file support).
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      status.textContent = 'Downloaded ' + filename + '.';
     };
   </script>
 </body>
